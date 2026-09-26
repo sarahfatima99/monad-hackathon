@@ -16,6 +16,12 @@ export const config = {
   contractAddress: (process.env.CONTRACT_ADDRESS ?? "") as `0x${string}`,
   operatorPrivateKey: (process.env.OPERATOR_PRIVATE_KEY ?? "") as `0x${string}`,
 
+  // Preferred: Resend (HTTP API, works cleanly in serverless/Vercel — no
+  // long-lived SMTP connection pool to manage). SMTP below is a fallback for
+  // anyone who'd rather use a traditional provider.
+  resendApiKey: process.env.RESEND_API_KEY ?? "",
+  emailFrom: process.env.EMAIL_FROM ?? "Monad Memory Challenge <no-reply@example.com>",
+
   smtp: {
     host: process.env.SMTP_HOST ?? "",
     port: Number(process.env.SMTP_PORT ?? 587),

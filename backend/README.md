@@ -6,7 +6,7 @@ Express + Socket.IO API that handles everything the smart contract can't: email 
 
 ```bash
 npm install
-cp .env.example .env   # fill in JWT secret, RPC url, contract address, operator key, SMTP creds
+cp .env.example .env   # fill in JWT secret, RPC url, contract address, operator key, RESEND_API_KEY
 npm run dev            # starts on http://localhost:4000
 npm run seed           # optional: creates a demo game starting in 2 minutes
 ```
@@ -40,3 +40,14 @@ Socket.IO: clients `join-game-room` with a game id and receive `phase` ticks (`w
 3. `GET /games/:id/claim-info` recomputes that same tree from the DB and returns the caller's proof, which the frontend passes to `claimReward()`.
 
 This means the backend never moves funds itself — it only publishes *who gets how much*, and the contract enforces the payout.
+
+## Deploying — a note if you're using Vercel
+
+Vercel is a great fit for the **frontend** (it's a static Vite build). The **backend** is a poor fit for Vercel's serverless functions as-is, because it:
+- keeps a live Socket.IO connection open per player (serverless functions are short-lived, request/response only)
+- runs a `setInterval` game-clock scheduler that must keep ticking every second (nothing persists between serverless invocations)
+- writes to a local SQLite file (serverless filesystems are ephemeral/read-only)
+
+For a real deployment, run the backend somewhere that supports a long-lived Node process — Railway, Render, Fly.io, or a small VM all work with zero code changes. Point the frontend's `VITE_API_URL` at that backend's URL, deploy the frontend to Vercel as normal, and set `FRONTEND_ORIGIN` on the backend to the Vercel URL for CORS.
+
+Email (Resend) works fine wherever the backend runs, including if you later split gameplay-grading into actual Vercel serverless functions — that's exactly the kind of stateless HTTP call Resend's API is built for.
