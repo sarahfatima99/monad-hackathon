@@ -25,7 +25,8 @@ export const config = {
   },
 
   // Gameplay timing, per the spec: 5s per photo, 5s per question, up to 5 rounds.
-  photoSeconds: 5,
-  questionSeconds: 5,
-  maxRounds: 5
+  // Overridable via env for automated/local testing so a full game does not take 50s+.
+  photoSeconds: Number(process.env.PHOTO_SECONDS ?? 5),
+  questionSeconds: Number(process.env.QUESTION_SECONDS ?? 5),
+  maxRounds: Number(process.env.MAX_ROUNDS ?? 5)
 };

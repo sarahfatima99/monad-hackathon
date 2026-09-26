@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import { appendFileSync } from "node:fs";
 import { config } from "../config.js";
 
 const transporter = nodemailer.createTransport({
@@ -12,6 +13,10 @@ export async function sendVerificationEmail(to: string, code: string) {
   if (!config.smtp.host) {
     // No SMTP configured (e.g. local dev) — log instead of sending.
     console.log(`[email] verification code for ${to}: ${code}`);
+    // For automated/local testing, also write it somewhere a test script can read.
+    if (process.env.DEV_CODE_FILE) {
+      appendFileSync(process.env.DEV_CODE_FILE, JSON.stringify({ to, code, at: Date.now() }) + "\n");
+    }
     return;
   }
   await transporter.sendMail({
