@@ -12,3 +12,4 @@ contracts/build
 .vercel
 .vercel
 .local-*.log
+.DS_Store
