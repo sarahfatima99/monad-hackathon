@@ -3,7 +3,7 @@ import { defineChain } from "viem";
 import { injected } from "wagmi/connectors";
 
 export const monadTestnet = defineChain({
-  id: 10143,
+  id: Number(import.meta.env.VITE_CHAIN_ID ?? 10143),
   name: "Monad Testnet",
   nativeCurrency: { name: "MON", symbol: "MON", decimals: 18 },
   rpcUrls: {

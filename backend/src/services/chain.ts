@@ -3,7 +3,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { config } from "../config.js";
 
 export const monadTestnet = defineChain({
-  id: 10143,
+  id: Number(process.env.CHAIN_ID ?? 10143),
   name: "Monad Testnet",
   nativeCurrency: { name: "MON", symbol: "MON", decimals: 18 },
   rpcUrls: { default: { http: [config.rpcUrl] } }
