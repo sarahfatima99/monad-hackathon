@@ -1,0 +1,24 @@
+{
+  "name": "@monad-memory/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "deploy:monad": "hardhat run scripts/deploy.ts --network monadTestnet"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "hardhat": "^2.22.0",
+    "typescript": "^5.5.0",
+    "ts-node": "^10.9.0",
+    "dotenv": "^16.4.0",
+    "merkletreejs": "^0.3.11",
+    "keccak256": "^1.0.6",
+    "@types/mocha": "^10.0.0",
+    "chai": "^4.4.0"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.0.0"
+  }
+}
