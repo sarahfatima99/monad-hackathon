@@ -12,6 +12,19 @@ This repo is the first version described in `docs/plan.md`-style spec: simple en
 4. **Play** — at the scheduled time the backend releases photo 1 (5s), then question 1 (5s), and so on for up to 5 rounds. Timing is server-driven so a refresh never restarts the game, and everyone sees the same content with randomized answer order.
 5. **Results** — a leaderboard ranks nicknames by score (ties share a rank). Anyone who scored 5/5 splits the funded pool equally. The backend computes/publishes the allocation, the contract enforces payout and blocks double-claims.
 
+## 🟣 Built on Monad — where it's actually used
+
+This is a Monad-hackathon project, so to be explicit: **Monad is the blockchain the whole money/ownership layer of the game runs on.** Here's exactly where it shows up:
+
+1. **The smart contract lives there** (`contracts/MemoryGame.sol`). Deployed to Monad testnet, it's the only place that touches actual funds: it holds each game's prize pool, tracks who registered, and pays out claims. It's EVM-compatible, so it's ordinary Solidity — Monad's pitch is just doing that faster/cheaper than Ethereum mainnet.
+2. **Joining a game = a Monad transaction.** When a player clicks "Join game," the frontend calls `joinGame(gameId)` directly on the contract via their wallet (MetaMask or similar, connected through wagmi/viem). That's a real on-chain transaction with a small gas fee, per the spec — even for free games.
+3. **Reading balances directly from the chain.** The player's MON wallet balance and each game's prize pool are read live from Monad (via `viem`'s public client) rather than trusted from the backend — so a player can verify the numbers independently instead of taking the app's word for it.
+4. **Finalizing and paying rewards.** After a game ends, the backend computes who scored 5/5, builds a Merkle tree of `(wallet, amount)`, and calls `finalizeGame()` on the contract using an operator wallet — this is a Monad transaction too. Winners then call `claimReward()` themselves (another transaction) with a Merkle proof, and the contract verifies and pays out in MON, blocking double-claims.
+
+**Where Monad is *not* involved:** the backend (email verification, nicknames, revealing photos/questions on schedule, grading) is off-chain — a contract can't send emails or keep quiz answers secret, so that stays in the small Express/SQLite service, and it only ever tells the contract *who gets paid how much*, never moves funds itself.
+
+**In short:** registration/join/claim are wallet-signed Monad transactions, and balances/pool amounts are read straight off Monad — everything else (content, timing, scoring) is regular backend logic that feeds the contract a final answer.
+
 ## Architecture
 
 ```
