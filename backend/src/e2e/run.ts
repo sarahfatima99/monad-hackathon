@@ -1,185 +1,187 @@
-// Automated local end-to-end smoke test.
-// Drives the whole flow against a local Hardhat node + this backend, using
-// viem directly instead of a browser wallet: creates a funded game on-chain,
-// registers a player through the real HTTP API, joins, answers every round
-// correctly, waits for the backend to finalize, then claims the reward
-// on-chain and checks the balance moved.
+// End-to-end test of the whole flow against a running API + chain, with real
+// wallets (viem) instead of a browser:
+//   admin creates + funds a game -> two players register (email code), pick
+//   nicknames, link wallets, join on-chain -> both play every round as the
+//   server reveals it (one answers perfectly, one misses a question) -> results
+//   trigger grading + on-chain finalization -> the winner claims on-chain.
 //
-// Run with: npx tsx src/e2e/run.ts
-import { readFileSync } from "node:fs";
-import { createPublicClient, createWalletClient, http, defineChain, formatEther, parseEther } from "viem";
+// Usage: API_URL=http://localhost:4000 RPC_URL=http://127.0.0.1:8545 CHAIN_ID=31337 \
+//        CONTRACT_ADDRESS=0x... ADMIN_KEY=dev-admin-key npx tsx src/e2e/run.ts
+// The API must run without RESEND_API_KEY (dev mode returns codes) and ideally
+// with PHOTO_SECONDS=1 QUESTION_SECONDS=1 MIN_LEAD_SECONDS=5 to keep it fast.
+import { createPublicClient, createWalletClient, defineChain, formatEther, http, parseEther } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
-const API_URL = process.env.API_URL ?? "http://localhost:4000";
+const API = (process.env.API_URL ?? "http://localhost:4000") + "/api";
 const RPC_URL = process.env.RPC_URL ?? "http://127.0.0.1:8545";
-const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS as `0x${string}`;
+const CHAIN_ID = Number(process.env.CHAIN_ID ?? 31337);
+const CONTRACT = process.env.CONTRACT_ADDRESS as `0x${string}`;
 const ADMIN_KEY = process.env.ADMIN_KEY ?? "dev-admin-key";
 
-// Standard, well-known Hardhat/Anvil default test accounts (never used with real funds).
-const ORGANIZER_PK = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80" as const;
-const PLAYER_PK = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d" as const;
+// Well-known Hardhat test accounts #1 and #2 (never hold real funds).
+const RUN = Date.now().toString(36).slice(-5);
+const PLAYERS = [
+  { email: `alice+${RUN}@example.com`, nickname: `alice_${RUN}`, pk: "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d" as const },
+  { email: `bob+${RUN}@example.com`, nickname: `bob_${RUN}`, pk: "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a" as const }
+];
 
 const chain = defineChain({
-  id: 31337,
-  name: "Local Hardhat",
-  nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 },
-  rpcUrls: { default: { http: [RPC_URL] } }
+  id: CHAIN_ID, name: "test", nativeCurrency: { name: "MON", symbol: "MON", decimals: 18 }, rpcUrls: { default: { http: [RPC_URL] } }
 });
-
+const publicClient = createPublicClient({ chain, transport: http(RPC_URL) });
 const abi = [
-  {
-    type: "function", name: "createGame", stateMutability: "payable",
-    inputs: [{ name: "startTime", type: "uint64" }, { name: "entryFee", type: "uint128" }],
-    outputs: [{ name: "gameId", type: "uint256" }]
-  },
-  {
-    type: "function", name: "joinGame", stateMutability: "payable",
-    inputs: [{ name: "gameId", type: "uint256" }], outputs: []
-  },
+  { type: "function", name: "joinGame", stateMutability: "payable", inputs: [{ name: "gameId", type: "uint256" }], outputs: [] },
   {
     type: "function", name: "claimReward", stateMutability: "nonpayable",
-    inputs: [
-      { name: "gameId", type: "uint256" }, { name: "amount", type: "uint256" },
-      { name: "proof", type: "bytes32[]" }
-    ], outputs: []
+    inputs: [{ name: "gameId", type: "uint256" }, { name: "amount", type: "uint256" }, { name: "proof", type: "bytes32[]" }], outputs: []
   }
 ] as const;
 
-const publicClient = createPublicClient({ chain, transport: http(RPC_URL) });
-const organizer = privateKeyToAccount(ORGANIZER_PK);
-const player = privateKeyToAccount(PLAYER_PK);
-const organizerWallet = createWalletClient({ account: organizer, chain, transport: http(RPC_URL) });
-const playerWallet = createWalletClient({ account: player, chain, transport: http(RPC_URL) });
-
-function log(step: string, detail?: unknown) {
-  console.log(`\n=== ${step} ===`);
-  if (detail !== undefined) console.log(detail);
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+function assert(cond: unknown, msg: string): asserts cond {
+  if (!cond) throw new Error(`Assertion failed: ${msg}`);
 }
 
-async function api(path: string, init?: RequestInit & { token?: string }) {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (init?.token) headers.Authorization = `Bearer ${init.token}`;
-  const res = await fetch(`${API_URL}${path}`, { ...init, headers: { ...headers, ...(init?.headers as any) } });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(`${path} -> ${res.status}: ${JSON.stringify(body)}`);
-  return body;
+async function api<T = any>(path: string, opts: { method?: string; body?: unknown; token?: string; admin?: boolean; expectError?: boolean } = {}): Promise<T> {
+  const res = await fetch(API + path, {
+    method: opts.method ?? (opts.body ? "POST" : "GET"),
+    headers: {
+      "Content-Type": "application/json",
+      ...(opts.token ? { Authorization: `Bearer ${opts.token}` } : {}),
+      ...(opts.admin ? { "x-admin-key": ADMIN_KEY } : {})
+    },
+    body: opts.body ? JSON.stringify(opts.body) : undefined
+  });
+  const json = await res.json().catch(() => ({}));
+  if (opts.expectError) {
+    assert(!res.ok, `${path} should have failed`);
+    return json;
+  }
+  if (!res.ok) throw new Error(`${path} -> ${res.status} ${JSON.stringify(json)}`);
+  return json;
 }
 
-async function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
+function step(msg: string) {
+  console.log(`\n=== ${msg}`);
 }
 
 async function main() {
-  if (!CONTRACT_ADDRESS) throw new Error("Set CONTRACT_ADDRESS env var to the deployed MemoryGame address");
+  assert(CONTRACT, "set CONTRACT_ADDRESS");
 
-  log("0. Sanity: chain + backend reachable", { chainId: await publicClient.getChainId() });
-  await api("/health");
+  step("Config + health");
+  const cfg = await api("/config");
+  assert(cfg.chainId === CHAIN_ID, "chain id from /api/config matches");
+  const status = await api("/admin/status", { admin: true });
+  console.log(status);
 
-  // 1. Organizer funds a game on-chain, starting a few seconds from now.
-  const startTime = Math.floor(Date.now() / 1000) + 8;
-  const poolWei = parseEther("10");
-  log("1. createGame on-chain", { startTime, poolWei: formatEther(poolWei) });
-  const createHash = await organizerWallet.writeContract({
-    address: CONTRACT_ADDRESS, abi, functionName: "createGame",
-    args: [BigInt(startTime), 0n], value: poolWei
-  });
-  await publicClient.waitForTransactionReceipt({ hash: createHash });
+  step("Admin creates and funds a 3-round game");
+  await api("/admin/games", { body: { name: "Too soon", startTime: Math.floor(Date.now() / 1000), poolMon: "1" }, admin: true, expectError: true });
+  const startTime = Math.floor(Date.now() / 1000) + 12;
+  const created = await api("/admin/games", { body: { name: "E2E Challenge", startTime, poolMon: "10", roundsCount: 3 }, admin: true });
+  console.log(created);
+  const { rounds } = await api(`/admin/games/${created.id}/rounds`, { admin: true });
+  assert(rounds.length === 3, "3 rounds stored");
+  rounds.forEach((r: any) => console.log(`  round ${r.roundIndex}: [${r.sceneId}] ${r.question} -> ${r.options[r.correctIndex]}`));
 
-  // 2. Organizer registers the off-chain content (3 quick rounds) and links it to onchain game 0.
-  const rounds = [
-    { photoUrl: "https://picsum.photos/seed/e2e1/400/300", question: "Q1?", options: ["A", "B"], correctOptionIndex: 0 },
-    { photoUrl: "https://picsum.photos/seed/e2e2/400/300", question: "Q2?", options: ["A", "B"], correctOptionIndex: 1 },
-    { photoUrl: "https://picsum.photos/seed/e2e3/400/300", question: "Q3?", options: ["A", "B"], correctOptionIndex: 0 }
-  ];
-  const { id: gameId } = await api("/admin/games", {
-    method: "POST",
-    headers: { "x-admin-key": ADMIN_KEY },
-    body: JSON.stringify({ name: "E2E Test Game", startTime, onchainGameId: 0, rounds })
-  });
-  log("2. Off-chain game created + linked", { gameId, onchainGameId: 0 });
+  const list = await api("/games");
+  const listed = list.games.find((g: any) => g.id === created.id);
+  assert(listed && listed.poolWei === parseEther("10").toString(), "game listed with its on-chain pool");
+  assert(["registration_open", "starting_soon"].includes(listed.status), "status before start");
 
-  // 3. Register + verify the player's email (backend writes the code to DEV_CODE_FILE for tests).
-  const email = "e2e-player@example.com";
-  await api("/auth/register", { method: "POST", body: JSON.stringify({ email }) });
-  const codeFile = process.env.DEV_CODE_FILE;
-  if (!codeFile) throw new Error("Set DEV_CODE_FILE env var (same path passed to the backend)");
-  let code: string | undefined;
-  for (let i = 0; i < 20 && !code; i++) {
-    await sleep(150);
-    const lines = readFileSync(codeFile, "utf8").trim().split("\n").filter(Boolean);
-    const entry = [...lines].reverse().map((l) => JSON.parse(l)).find((e) => e.to === email);
-    code = entry?.code;
+  step("Players register, verify, pick nicknames, link wallets, join on-chain");
+  const tokens: string[] = [];
+  for (const p of PLAYERS) {
+    const reg = await api("/auth/register", { body: { email: p.email } });
+    assert(reg.devCode, "dev mode returns the code");
+    await api("/auth/verify", { body: { email: p.email, code: "000000" }, expectError: true });
+    const { token } = await api("/auth/verify", { body: { email: p.email, code: reg.devCode } });
+    await api("/auth/nickname", { body: { nickname: p.nickname }, token });
+    const account = privateKeyToAccount(p.pk);
+    const { message } = await api("/auth/wallet/nonce", { body: {}, token });
+    await api("/auth/wallet/link", { body: { address: account.address, signature: await account.signMessage({ message }) }, token });
+
+    const wallet = createWalletClient({ account, chain, transport: http(RPC_URL) });
+    const hash = await wallet.writeContract({ address: CONTRACT, abi, functionName: "joinGame", args: [BigInt(created.onchainGameId)] });
+    await publicClient.waitForTransactionReceipt({ hash });
+    await api(`/games/${created.id}/join`, { body: { txHash: hash }, token });
+    tokens.push(token);
+    console.log(`  ${p.nickname} joined (${account.address})`);
   }
-  if (!code) throw new Error(`No verification code found for ${email} in ${codeFile}`);
-  const { token } = await api("/auth/verify", {
-    method: "POST",
-    body: JSON.stringify({ email, code })
-  });
-  log("3. Player verified", { hasToken: !!token });
+  await api("/auth/nickname", { body: { nickname: PLAYERS[0].nickname.toUpperCase() }, token: tokens[1], expectError: true });
 
-  await api("/auth/nickname", { method: "POST", token, body: JSON.stringify({ nickname: "e2ePlayer" }) });
-
-  // 4. Link the player's wallet with a signed nonce (SIWE-style).
-  const { message } = await api("/auth/wallet/nonce", { method: "POST", token });
-  const signature = await player.signMessage({ message });
-  await api("/auth/wallet/link", { method: "POST", token, body: JSON.stringify({ address: player.address, signature }) });
-  log("4. Wallet linked", { address: player.address });
-
-  // 5. Player joins on-chain, then tells the backend.
-  const joinHash = await playerWallet.writeContract({
-    address: CONTRACT_ADDRESS, abi, functionName: "joinGame", args: [0n]
-  });
-  await publicClient.waitForTransactionReceipt({ hash: joinHash });
-  await api(`/games/${gameId}/join`, { method: "POST", token, body: JSON.stringify({ txHash: joinHash }) });
-  log("5. Player joined", { joinHash });
-
-  // 6. Wait for the game to start, then answer every round correctly as soon as it's askable.
-  const answeredRounds = new Set<number>();
-  log("6. Waiting for game to start and playing all rounds...");
+  step("Both play every round as the server reveals it");
+  const answered = [new Set<number>(), new Set<number>()];
+  let sawPhoto = false;
   while (true) {
-    const round = await api(`/games/${gameId}/round`, { token });
-    if (round.phase.phase === "finished") break;
-    if (round.phase.phase === "question" && !answeredRounds.has(round.phase.roundIndex)) {
-      const correct = rounds[round.phase.roundIndex].correctOptionIndex;
-      await api(`/games/${gameId}/answer`, {
-        method: "POST", token,
-        body: JSON.stringify({ roundIndex: round.phase.roundIndex, selectedOptionIndex: correct })
-      });
-      answeredRounds.add(round.phase.roundIndex);
-      console.log(`  answered round ${round.phase.roundIndex} with option ${correct}`);
+    const states = await Promise.all(tokens.map((t) => api(`/games/${created.id}/play`, { token: t })));
+    if (states[0].phase.phase === "finished") break;
+    for (const [i, s] of states.entries()) {
+      assert(s.registered, "player registered");
+      if (s.phase.phase === "photo") {
+        assert(s.photo && !s.question, "photo phase shows the photo only");
+        sawPhoto = true;
+      }
+      if (s.phase.phase === "question" && !answered[i].has(s.phase.roundIndex)) {
+        assert(!s.photo && s.options.length >= 2, "question phase hides the photo");
+        const r = rounds[s.phase.roundIndex];
+        // Player 0 answers perfectly; player 1 gets round 0 wrong.
+        const choice = i === 1 && s.phase.roundIndex === 0 ? (r.correctIndex + 1) % r.options.length : r.correctIndex;
+        await api(`/games/${created.id}/answer`, { body: { roundIndex: s.phase.roundIndex, optionIndex: choice }, token: tokens[i] });
+        answered[i].add(s.phase.roundIndex);
+        console.log(`  ${PLAYERS[i].nickname} answered round ${s.phase.roundIndex}: "${r.options[choice]}"`);
+      }
     }
-    await sleep(300);
+    await sleep(250);
   }
-  log("6. Game finished");
+  assert(sawPhoto, "saw at least one photo phase");
+  assert(answered[0].size === 3 && answered[1].size === 3, "every round answered");
+  await api(`/games/${created.id}/answer`, { body: { roundIndex: 0, optionIndex: 0 }, token: tokens[0], expectError: true });
 
-  // 7. Check the leaderboard, then claim the reward.
-  await sleep(1500); // give the scheduler a tick to finalize + publish on-chain
-  const board = await api(`/games/${gameId}/leaderboard`);
-  log("7. Leaderboard", board);
+  step("Results: grading + on-chain finalization");
+  let results: any;
+  for (let i = 0; i < 20; i++) {
+    results = await api(`/games/${created.id}/results`, { token: tokens[0] });
+    if (results.ready) break;
+    if (results.finalizeError) console.log("  finalize error (will retry):", results.finalizeError);
+    await sleep(1000);
+  }
+  console.log(JSON.stringify(results.leaderboard, null, 2));
+  assert(results.ready, "game finalized");
+  assert(results.leaderboard[0].nickname === PLAYERS[0].nickname && results.leaderboard[0].score === 3, "alice 3/3 on top");
+  assert(results.leaderboard[1].nickname === PLAYERS[1].nickname && results.leaderboard[1].score === 2, "bob 2/3");
+  assert(results.me.rewardWei === parseEther("10").toString(), "alice wins the whole pool");
+  const bobResults = await api(`/games/${created.id}/results`, { token: tokens[1] });
+  assert(bobResults.me.rewardWei === "0", "bob wins nothing");
 
-  const claim = await api(`/games/${gameId}/claim-info`, { token });
-  log("8. Claim info", claim);
-  if (!claim.eligible) throw new Error("Player was not marked eligible for a reward — check scoring/finalize logic");
+  const meBefore = await api("/auth/me", { token: tokens[0] });
+  assert(meBefore.claimableWei === parseEther("10").toString(), "10 MON claimable in the player bar");
 
-  const balanceBefore = await publicClient.getBalance({ address: player.address });
-  const claimHash = await playerWallet.writeContract({
-    address: CONTRACT_ADDRESS, abi, functionName: "claimReward",
-    args: [BigInt(claim.onchainGameId), BigInt(claim.amountWei), claim.proof]
+  step("Winner claims on-chain");
+  const alice = privateKeyToAccount(PLAYERS[0].pk);
+  const aliceWallet = createWalletClient({ account: alice, chain, transport: http(RPC_URL) });
+  const before = await publicClient.getBalance({ address: alice.address });
+  const hash = await aliceWallet.writeContract({
+    address: CONTRACT, abi, functionName: "claimReward",
+    args: [BigInt(created.onchainGameId), BigInt(results.me.rewardWei), results.me.proof]
   });
-  await publicClient.waitForTransactionReceipt({ hash: claimHash });
-  const balanceAfter = await publicClient.getBalance({ address: player.address });
+  await publicClient.waitForTransactionReceipt({ hash });
+  const after = await publicClient.getBalance({ address: alice.address });
+  console.log(`  balance ${formatEther(before)} -> ${formatEther(after)} MON`);
+  assert(after - before > parseEther("9.99"), "reward received");
 
-  log("9. Reward claimed on-chain", {
-    amountWei: claim.amountWei,
-    balanceBefore: formatEther(balanceBefore),
-    balanceAfter: formatEther(balanceAfter),
-    delta: formatEther(balanceAfter - balanceBefore)
-  });
+  const meAfter = await api("/auth/me", { token: tokens[0] });
+  assert(meAfter.claimableWei === "0" && meAfter.totalWonWei === parseEther("10").toString(), "claimed reward no longer claimable");
+  const resultsAfter = await api(`/games/${created.id}/results`, { token: tokens[0] });
+  assert(resultsAfter.me.claimed === true, "results show claimed");
 
-  console.log("\n✅ End-to-end flow passed: register -> verify -> nickname -> wallet link -> join -> play -> finalize -> claim");
+  step("Admin view");
+  const adminGames = await api("/admin/games", { admin: true });
+  console.log(adminGames.games.find((g: any) => g.id === created.id));
+
+  console.log("\n✅ E2E passed: create+fund -> register -> link wallet -> join -> play -> finalize -> claim");
 }
 
 main().catch((err) => {
-  console.error("\n❌ E2E test failed:", err);
+  console.error("\n❌ E2E failed:", err);
   process.exit(1);
 });

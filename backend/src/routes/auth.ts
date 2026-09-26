@@ -1,134 +1,161 @@
 import { Router } from "express";
 import { z } from "zod";
 import { nanoid } from "nanoid";
-import { verifyMessage } from "viem";
-import { db } from "../db.js";
-import { sendVerificationEmail } from "../services/email.js";
-import { signToken, requireAuth, type AuthedRequest } from "../middleware/auth.js";
-import { getWalletBalance } from "../services/chain.js";
+import { createHash, randomInt } from "node:crypto";
+import { getAddress, isAddress, verifyMessage } from "viem";
+import { query, queryOne } from "../db.js";
+import { sendVerificationEmail } from "../lib/email.js";
+import { requireAuth, signToken, type AuthedRequest } from "../lib/auth.js";
+import { HttpError, route } from "../lib/http.js";
+import { hasClaimedOnchain } from "../lib/chain.js";
 
 export const authRouter = Router();
 
-function sixDigitCode(): string {
-  return String(Math.floor(100000 + Math.random() * 900000));
-}
+const CODE_TTL_MS = 15 * 60 * 1000;
+const RESEND_COOLDOWN_MS = 45 * 1000;
+const MAX_CODE_ATTEMPTS = 5;
 
-// 1. Register with email -> sends a verification code.
-authRouter.post("/register", async (req, res) => {
-  const schema = z.object({ email: z.string().email() });
-  const { email } = schema.parse(req.body);
+const hashCode = (email: string, code: string) => createHash("sha256").update(`${email}:${code}`).digest("hex");
+const normEmail = (e: string) => e.trim().toLowerCase();
+const walletMessage = (nonce: string) =>
+  `Monad Memory Challenge\n\nSign this message to link this wallet to your account.\nThis does not cost anything.\n\nNonce: ${nonce}`;
 
-  const code = sixDigitCode();
-  const expiresAt = Date.now() + 15 * 60 * 1000;
+// 1. Email -> send a 6-digit code (also how returning players sign in).
+authRouter.post(
+  "/register",
+  route(async (req, res) => {
+    const email = normEmail(z.object({ email: z.string().email() }).parse(req.body).email);
+    const now = Date.now();
+    let account = await queryOne("SELECT id, code_sent_at FROM accounts WHERE email = $1", [email]);
 
-  const existing = db.prepare("SELECT id FROM accounts WHERE email = ?").get(email) as
-    | { id: string }
-    | undefined;
-
-  if (existing) {
-    db.prepare("UPDATE accounts SET verification_code = ?, verification_expires_at = ? WHERE id = ?").run(
-      code,
-      expiresAt,
-      existing.id
-    );
-  } else {
-    db.prepare(
-      "INSERT INTO accounts (id, email, verification_code, verification_expires_at, created_at) VALUES (?, ?, ?, ?, ?)"
-    ).run(nanoid(), email, code, expiresAt, Date.now());
-  }
-
-  await sendVerificationEmail(email, code);
-  res.json({ ok: true });
-});
-
-// 2. Verify the emailed code, get back a session token.
-authRouter.post("/verify", (req, res) => {
-  const schema = z.object({ email: z.string().email(), code: z.string() });
-  const { email, code } = schema.parse(req.body);
-
-  const account = db.prepare("SELECT * FROM accounts WHERE email = ?").get(email) as any;
-  if (!account) return res.status(404).json({ error: "No such account" });
-  if (account.verification_code !== code || Date.now() > account.verification_expires_at) {
-    return res.status(400).json({ error: "Invalid or expired code" });
-  }
-
-  db.prepare("UPDATE accounts SET email_verified = 1, verification_code = NULL WHERE id = ?").run(account.id);
-  res.json({ token: signToken(account.id) });
-});
-
-// 3. Choose a unique nickname (requires verified email).
-authRouter.post("/nickname", requireAuth, (req: AuthedRequest, res) => {
-  const schema = z.object({ nickname: z.string().min(3).max(20).regex(/^[a-zA-Z0-9_]+$/) });
-  const { nickname } = schema.parse(req.body);
-
-  const account = db.prepare("SELECT * FROM accounts WHERE id = ?").get(req.accountId) as any;
-  if (!account?.email_verified) return res.status(403).json({ error: "Email not verified" });
-
-  const taken = db.prepare("SELECT id FROM accounts WHERE nickname = ? AND id != ?").get(nickname, req.accountId);
-  if (taken) return res.status(409).json({ error: "Nickname already taken" });
-
-  db.prepare("UPDATE accounts SET nickname = ? WHERE id = ?").run(nickname, req.accountId);
-  res.json({ ok: true });
-});
-
-// 4a. Get a one-time nonce to sign, proving wallet ownership.
-authRouter.post("/wallet/nonce", requireAuth, (req: AuthedRequest, res) => {
-  const nonce = nanoid(24);
-  db.prepare("UPDATE accounts SET wallet_nonce = ? WHERE id = ?").run(nonce, req.accountId);
-  const message = `Monad Memory Challenge\n\nSign this message to link your wallet.\nNonce: ${nonce}`;
-  res.json({ message });
-});
-
-// 4b. Verify the signature and link the wallet to the account.
-authRouter.post("/wallet/link", requireAuth, async (req: AuthedRequest, res) => {
-  const schema = z.object({ address: z.string(), signature: z.string() });
-  const { address, signature } = schema.parse(req.body);
-
-  const account = db.prepare("SELECT * FROM accounts WHERE id = ?").get(req.accountId) as any;
-  if (!account?.wallet_nonce) return res.status(400).json({ error: "Request a nonce first" });
-
-  const message = `Monad Memory Challenge\n\nSign this message to link your wallet.\nNonce: ${account.wallet_nonce}`;
-  const valid = await verifyMessage({
-    address: address as `0x${string}`,
-    message,
-    signature: signature as `0x${string}`
-  });
-  if (!valid) return res.status(400).json({ error: "Signature does not match address" });
-
-  const inUse = db.prepare("SELECT id FROM accounts WHERE wallet_address = ? AND id != ?").get(address, req.accountId);
-  if (inUse) return res.status(409).json({ error: "Wallet already linked to another account" });
-
-  db.prepare("UPDATE accounts SET wallet_address = ?, wallet_nonce = NULL WHERE id = ?").run(address, req.accountId);
-  res.json({ ok: true });
-});
-
-// Player info shown at the top of the screen.
-authRouter.get("/me", requireAuth, async (req: AuthedRequest, res) => {
-  const account = db.prepare("SELECT * FROM accounts WHERE id = ?").get(req.accountId) as any;
-  if (!account) return res.status(404).json({ error: "Not found" });
-
-  let walletBalanceWei = "0";
-  if (account.wallet_address) {
-    try {
-      walletBalanceWei = (await getWalletBalance(account.wallet_address)).toString();
-    } catch {
-      // chain not reachable in this environment; leave as 0
+    if (account?.code_sent_at && now - account.code_sent_at < RESEND_COOLDOWN_MS) {
+      const wait = Math.ceil((RESEND_COOLDOWN_MS - (now - account.code_sent_at)) / 1000);
+      throw new HttpError(429, `A code was just sent. You can request another in ${wait}s.`);
     }
-  }
 
-  const rewards = db
-    .prepare(
-      `SELECT COALESCE(SUM(CAST(reward_amount_wei as INTEGER)), 0) as total
-       FROM game_participants WHERE account_id = ? AND reward_amount_wei IS NOT NULL`
-    )
-    .get(req.accountId) as { total: number };
+    const code = String(randomInt(100000, 1000000));
+    if (!account) {
+      account = { id: nanoid() };
+      await query("INSERT INTO accounts (id, email, created_at) VALUES ($1, $2, $3)", [account.id, email, now]);
+    }
+    await query(
+      "UPDATE accounts SET code_hash = $2, code_expires_at = $3, code_attempts = 0, code_sent_at = $4 WHERE id = $1",
+      [account.id, hashCode(email, code), now + CODE_TTL_MS, now]
+    );
 
-  res.json({
-    email: account.email,
-    emailVerified: !!account.email_verified,
-    nickname: account.nickname,
-    walletAddress: account.wallet_address,
-    walletBalanceWei,
-    totalRewardsWei: String(rewards.total)
-  });
-});
+    const { devCode } = await sendVerificationEmail(email, code);
+    res.json({ ok: true, devCode });
+  })
+);
+
+// 2. Verify the code -> session token.
+authRouter.post(
+  "/verify",
+  route(async (req, res) => {
+    const body = z.object({ email: z.string().email(), code: z.string().trim().regex(/^\d{6}$/, "must be 6 digits") }).parse(req.body);
+    const email = normEmail(body.email);
+    const account = await queryOne("SELECT * FROM accounts WHERE email = $1", [email]);
+    if (!account?.code_hash) throw new HttpError(400, "Request a code first");
+    if (Date.now() > account.code_expires_at) throw new HttpError(400, "That code expired. Request a new one.");
+    if (account.code_attempts >= MAX_CODE_ATTEMPTS) throw new HttpError(429, "Too many wrong attempts. Request a new code.");
+
+    if (account.code_hash !== hashCode(email, body.code)) {
+      await query("UPDATE accounts SET code_attempts = code_attempts + 1 WHERE id = $1", [account.id]);
+      throw new HttpError(400, "Wrong code");
+    }
+
+    await query("UPDATE accounts SET email_verified = TRUE, code_hash = NULL WHERE id = $1", [account.id]);
+    res.json({ token: signToken(account.id) });
+  })
+);
+
+// 3. Unique nickname.
+authRouter.post(
+  "/nickname",
+  requireAuth,
+  route(async (req: AuthedRequest, res) => {
+    const { nickname } = z
+      .object({ nickname: z.string().trim().min(3, "at least 3 characters").max(20).regex(/^[a-zA-Z0-9_]+$/, "letters, numbers and _ only") })
+      .parse(req.body);
+    const taken = await queryOne("SELECT id FROM accounts WHERE nickname_key = $1 AND id <> $2", [nickname.toLowerCase(), req.accountId]);
+    if (taken) throw new HttpError(409, "That nickname is taken");
+    await query("UPDATE accounts SET nickname = $2, nickname_key = $3 WHERE id = $1", [req.accountId, nickname, nickname.toLowerCase()]);
+    res.json({ ok: true });
+  })
+);
+
+// 4a. Nonce to sign, proving wallet ownership.
+authRouter.post(
+  "/wallet/nonce",
+  requireAuth,
+  route(async (req: AuthedRequest, res) => {
+    const nonce = nanoid(24);
+    await query("UPDATE accounts SET wallet_nonce = $2 WHERE id = $1", [req.accountId, nonce]);
+    res.json({ message: walletMessage(nonce) });
+  })
+);
+
+// 4b. Verify the signature and link the wallet.
+authRouter.post(
+  "/wallet/link",
+  requireAuth,
+  route(async (req: AuthedRequest, res) => {
+    const body = z.object({ address: z.string().refine((a) => isAddress(a), "not an address"), signature: z.string() }).parse(req.body);
+    const account = await queryOne("SELECT wallet_nonce FROM accounts WHERE id = $1", [req.accountId]);
+    if (!account?.wallet_nonce) throw new HttpError(400, "Request a nonce first");
+
+    const valid = await verifyMessage({
+      address: body.address as `0x${string}`,
+      message: walletMessage(account.wallet_nonce),
+      signature: body.signature as `0x${string}`
+    });
+    if (!valid) throw new HttpError(400, "Signature does not match the wallet");
+
+    const address = getAddress(body.address);
+    const inUse = await queryOne("SELECT id FROM accounts WHERE wallet_address = $1 AND id <> $2", [address, req.accountId]);
+    if (inUse) throw new HttpError(409, "This wallet is already linked to another account");
+
+    await query("UPDATE accounts SET wallet_address = $2, wallet_nonce = NULL WHERE id = $1", [req.accountId, address]);
+    res.json({ ok: true, address });
+  })
+);
+
+// Player info for the top bar: nickname, wallet, rewards won / claimable.
+authRouter.get(
+  "/me",
+  requireAuth,
+  route(async (req: AuthedRequest, res) => {
+    const account = await queryOne("SELECT * FROM accounts WHERE id = $1", [req.accountId]);
+    if (!account) throw new HttpError(401, "Please sign in again");
+
+    const rewards = await query<{ game_id: string; name: string; onchain_game_id: number; reward_wei: string; wallet_address: string }>(
+      `SELECT gp.game_id, g.name, g.onchain_game_id, gp.reward_wei, gp.wallet_address
+       FROM game_participants gp JOIN games g ON g.id = gp.game_id
+       WHERE gp.account_id = $1 AND gp.reward_wei IS NOT NULL AND gp.reward_wei > 0`,
+      [req.accountId]
+    );
+
+    let totalWon = 0n;
+    let claimable = 0n;
+    const claimableGames: { gameId: string; name: string; amountWei: string }[] = [];
+    for (const r of rewards) {
+      const amount = BigInt(r.reward_wei);
+      totalWon += amount;
+      const claimed = await hasClaimedOnchain(r.onchain_game_id, r.wallet_address).catch(() => false);
+      if (!claimed) {
+        claimable += amount;
+        claimableGames.push({ gameId: r.game_id, name: r.name, amountWei: r.reward_wei });
+      }
+    }
+
+    res.json({
+      email: account.email,
+      emailVerified: account.email_verified,
+      nickname: account.nickname,
+      walletAddress: account.wallet_address,
+      totalWonWei: totalWon.toString(),
+      claimableWei: claimable.toString(),
+      claimableGames
+    });
+  })
+);

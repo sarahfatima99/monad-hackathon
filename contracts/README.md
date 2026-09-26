@@ -1,31 +1,30 @@
 # contracts
 
-Hardhat project for `MemoryGame.sol`, the on-chain piece of the Monad Memory Challenge.
-
-## Setup
+`MemoryGame.sol`, the on-chain part of the Monad Memory Challenge: prize pools, registration, results and payouts.
 
 ```bash
 npm install
-cp .env.example .env   # fill in MONAD_TESTNET_RPC_URL and PRIVATE_KEY
-npx hardhat compile
-npx hardhat test
+npm test                                          # unit tests (compiler bundled; no download needed)
+DEPLOYER_PK=0x... npm run deploy:monad            # deploy to Monad testnet (needs test MON for gas)
 ```
 
-## Deploy to Monad testnet
+`deploy:monad` prints the contract address. Set it as `CONTRACT_ADDRESS` for the API (Vercel env / `backend/.env`). By default the deployer is also the **operator**, the account the API uses to create and finalize games, so `OPERATOR_PRIVATE_KEY` should be the same key. Pass `OPERATOR_ADDRESS=0x…` to use a different operator.
 
-```bash
-npm run deploy:monad
-```
+## Functions
 
-The deploy script prints the deployed address — put it in `backend/.env` (`CONTRACT_ADDRESS`) and `frontend/.env` (`VITE_CONTRACT_ADDRESS`).
+| Function | Who | What |
+|---|---|---|
+| `createGame(startTime, entryFee)` payable | operator | Creates a game; `msg.value` funds the prize pool |
+| `joinGame(gameId)` payable | anyone | Registers the caller before `startTime` (pays `entryFee`, 0 for free games) |
+| `finalizeGame(gameId, root, totalAllocated)` | operator | After the start: publishes the Merkle root of `(wallet, amount)` rewards and their total (`0x0`/`0` when nobody won) |
+| `claimReward(gameId, amount, proof)` | winner | Pays the caller's allocated reward, once |
+| `cancelGame(gameId)` | operator | Before the start only |
+| `withdrawUnclaimed(gameId)` | organizer | Once: the funding of a cancelled game, or the unallocated part of a finalized pool |
+| `refundEntryFee(gameId)` | player | Entry-fee refund for a cancelled game |
+| `getGame(gameId)` / `getGameAccounting(gameId)` | view | Schedule, pool, player count, status / allocation details |
 
-## Design
+**Guarantees:** only the operator can create, finalize or cancel games. Rewards are capped at the published allocation. The organizer can never withdraw the winners' share. Every claim and refund can happen only once.
 
-- `createGame(startTime)` — operator-only, `payable`; funds the prize pool and creates a game entry.
-- `joinGame(gameId)` — anyone can call before `startTime`; registers `msg.sender`, reverts on duplicate or late join. A game may optionally require an entry fee (0 by default), but joining always costs at least the network's gas fee.
-- `finalizeGame(gameId, rewardsRoot)` — operator-only; publishes a Merkle root committing to the `(wallet, amount)` reward allocation computed off-chain by the backend after grading.
-- `claimReward(gameId, amount, proof)` — anyone can call; verifies `msg.sender`+`amount` against the published Merkle root and pays out once per wallet per game.
-- `cancelGame(gameId)` / `refund(gameId)` — operator can cancel an unstarted game; registered players (or the organizer, if nobody joined) can withdraw the pool pro-rata.
-- `getGame(gameId)` — view returning schedule, pool, participant count, and status.
+## Compilers
 
-Funds move only through the contract; the backend can never move MON on its own — it only signs off on *who* gets *how much*, and the contract enforces the payout and blocks double-claims.
+`hardhat.config.ts` points Hardhat at the solc compiler shipped in the `solc` npm package, so compiling never needs to reach `binaries.soliditylang.org`, which is blocked on some networks. `scripts/compile-solcjs.cjs` and `scripts/deploy-solcjs.cjs` compile and deploy with viem directly; the deploy scripts use them.

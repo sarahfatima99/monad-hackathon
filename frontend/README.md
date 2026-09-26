@@ -1,18 +1,22 @@
 # frontend
 
-React + Vite SPA with the app's 4 screens: Account, Games, Lobby/Play, Results.
-
-## Setup
+React + Vite + Tailwind, with wagmi/viem for wallets.
 
 ```bash
 npm install
-cp .env.example .env   # fill in VITE_API_URL, VITE_CONTRACT_ADDRESS, VITE_MONAD_RPC_URL
-npm run dev
+npm run dev      # http://localhost:5173 — /api is proxied to the API on :4000
 ```
 
-## Notes
+It needs **no environment variables**: chain id, RPC, explorer and contract address come from the API's `/api/config`. Set `API_PROXY_TARGET` if your local API runs somewhere other than `http://localhost:4000`.
 
-- Wallet connection uses `wagmi` + `viem` (`src/lib/wagmi.ts`) targeting the Monad testnet chain (id `10143`, adjust if the network changes).
-- Wallet **balance** and the on-chain **prize pool** are read straight from the chain via `wagmi`/`viem`, never from the backend, so a player can trust the numbers independently.
-- Game timing (`src/pages/LobbyPage.tsx`) is driven by a Socket.IO `phase` event from the backend, not a client-side timer, so refreshing never restarts a game.
-- `joinGame` and `claimReward` are sent directly from the browser wallet to `MemoryGame.sol`; the backend is only told about the join afterwards (`POST /games/:id/join`) so it can show accurate participant counts even before the chain event indexes.
+## Screens
+
+- **Games** (`/`): upcoming games with local start time, live countdown, registered players, prize pool, status, and Join / Enter lobby / View results. Recent results appear below.
+- **Account** (`/account`): email → code → nickname → connect and sign with a wallet. Returning players sign in with the same email.
+- **Lobby / Play** (`/games/:id`): countdown, pool, players and instructions, then switches automatically into the rounds: picture (5 s) then question (5 s) with timer bars, synced to the server clock.
+- **Results** (`/games/:id/results`): leaderboard (ties share a rank, you're highlighted), your score, reward and **Claim**.
+- **Organizer** (`/admin`): schedule and fund games, preview content and answers, cancel, publish results, withdraw.
+
+The top bar shows your nickname, wallet, MON balance (read from the chain), rewards won and rewards to claim.
+
+Transactions switch the wallet to the right network first, and add the network if the wallet doesn't know it.

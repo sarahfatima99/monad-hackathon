@@ -1,38 +1,50 @@
+import { Link } from "react-router-dom";
 import { useAccount, useBalance } from "wagmi";
-import { useQuery } from "@tanstack/react-query";
-import { formatEther } from "viem";
-import { api } from "../lib/api";
+import { getToken } from "../lib/api";
+import { useAppConfig, useMe } from "../lib/hooks";
+import { formatMon, shortAddress } from "../lib/format";
 
+/** Spec §3: nickname, wallet, MON balance (read from chain), rewards won, rewards to claim. */
 export function PlayerBar() {
-  const { address, isConnected } = useAccount();
-  const { data: balance } = useBalance({ address, query: { enabled: isConnected, refetchInterval: 15000 } });
+  const cfg = useAppConfig();
+  const { data: me } = useMe();
+  const { address } = useAccount();
+  const wallet = (me?.walletAddress ?? address) as `0x${string}` | undefined;
+  const { data: balance } = useBalance({ address: wallet, chainId: cfg.chainId, query: { enabled: !!wallet, refetchInterval: 15_000 } });
 
-  const { data: me } = useQuery({
-    queryKey: ["me"],
-    queryFn: api.me,
-    enabled: !!localStorage.getItem("token"),
-    refetchInterval: 20000
-  });
+  if (!getToken()) {
+    return (
+      <div className="border-t border-white/5 bg-monad/10 px-4 py-2 text-center text-sm text-slate-300">
+        <Link to="/account" className="font-semibold text-monad-light underline">Sign up with your email</Link> to join games and win MON.
+      </div>
+    );
+  }
 
-  if (!localStorage.getItem("token")) return null;
+  const Item = ({ label, value, highlight }: { label: string; value: React.ReactNode; highlight?: boolean }) => (
+    <div className="flex items-baseline gap-1.5 whitespace-nowrap">
+      <span className="text-slate-500">{label}</span>
+      <span className={highlight ? "font-semibold text-emerald-300" : "font-medium text-slate-100"}>{value}</span>
+    </div>
+  );
+
+  const claimable = me ? BigInt(me.claimableWei) : 0n;
 
   return (
-    <div className="bg-slate-900/70 border-b border-slate-800 px-6 py-2 flex flex-wrap gap-x-6 gap-y-1 text-sm text-slate-300">
-      <span>
-        <span className="text-slate-500">Nickname:</span> {me?.nickname ?? "—"}
-      </span>
-      <span>
-        <span className="text-slate-500">Wallet:</span>{" "}
-        {address ? `${address.slice(0, 6)}…${address.slice(-4)}` : "not connected"}
-      </span>
-      <span>
-        <span className="text-slate-500">MON balance:</span>{" "}
-        {balance ? `${Number(formatEther(balance.value)).toFixed(3)} MON` : "—"}
-      </span>
-      <span>
-        <span className="text-slate-500">Rewards won:</span>{" "}
-        {me ? `${Number(formatEther(BigInt(me.totalRewardsWei))).toFixed(3)} MON` : "—"}
-      </span>
+    <div className="border-t border-white/5 bg-white/[0.02]">
+      <div className="mx-auto flex max-w-5xl flex-wrap gap-x-5 gap-y-1 px-4 py-2 text-sm">
+        <Item label="Player" value={me?.nickname ?? <Link to="/account" className="text-amber-300 underline">set nickname</Link>} />
+        <Item label="Wallet" value={me?.walletAddress ? shortAddress(me.walletAddress) : <Link to="/account" className="text-amber-300 underline">link wallet</Link>} />
+        <Item label="Balance" value={balance ? formatMon(balance.value, 3) : "—"} />
+        <Item label="Won" value={me ? formatMon(me.totalWonWei, 3) : "—"} />
+        {claimable > 0n ? (
+          <Link to={`/games/${me!.claimableGames[0].gameId}/results`} className="flex items-baseline gap-1.5">
+            <span className="text-slate-500">To claim</span>
+            <span className="font-semibold text-emerald-300 underline">{formatMon(claimable, 3)}</span>
+          </Link>
+        ) : (
+          <Item label="To claim" value="0 MON" />
+        )}
+      </div>
     </div>
   );
 }

@@ -1,5 +1,7 @@
 node_modules
 dist
-*.sqlite
 .env
+.pglite
+*.sqlite
 dev-codes.log
+.pglite-local

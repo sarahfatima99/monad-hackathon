@@ -2,11 +2,26 @@
 @tailwind components;
 @tailwind utilities;
 
+@layer base {
+  body {
+    @apply bg-[#0b0a1a] text-slate-100 antialiased;
+  }
+}
+
 @layer components {
   .btn-primary {
-    @apply bg-emerald-500 text-slate-950 font-medium px-4 py-2 rounded-md hover:bg-emerald-400 transition disabled:opacity-50 disabled:cursor-not-allowed;
+    @apply inline-flex items-center justify-center gap-2 rounded-lg bg-monad px-4 py-2.5 font-semibold text-white shadow-lg shadow-monad/20 transition hover:bg-monad-light disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg border border-white/15 bg-white/5 px-4 py-2.5 font-medium text-slate-100 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50;
   }
   .card {
-    @apply rounded-lg border border-slate-800 bg-slate-900/40 p-4;
+    @apply rounded-2xl border border-white/10 bg-white/[0.03] p-5;
+  }
+  .input {
+    @apply w-full rounded-lg border border-white/15 bg-black/30 px-3 py-2.5 text-slate-100 placeholder:text-slate-500 focus:border-monad focus:outline-none;
+  }
+  .label {
+    @apply mb-1 block text-sm text-slate-400;
   }
 }

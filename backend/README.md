@@ -1,53 +1,42 @@
-# backend
+# backend (API)
 
-Express + Socket.IO API that handles everything the smart contract can't: email verification, nickname/account linking, the synchronized reveal timer, grading answers, and computing the final reward split it publishes to `MemoryGame.sol`.
-
-## Setup
+Express + TypeScript API. Locally it runs as a normal server (`npm run dev`, port 4000); on Vercel the same app is bundled into one serverless function at `/api/*` (see `../scripts/vercel-build.mjs`).
 
 ```bash
 npm install
-cp .env.example .env   # fill in JWT secret, RPC url, contract address, operator key, RESEND_API_KEY
-npm run dev            # starts on http://localhost:4000
-npm run seed           # optional: creates a demo game starting in 2 minutes
+cp .env.example .env     # locally only CONTRACT_ADDRESS / OPERATOR_PRIVATE_KEY / chain are needed
+npm run dev
 ```
 
-SQLite database file (`data.sqlite`) is created automatically on first run.
+Easiest local setup: run `../start-local.sh`, which does all of this for you.
 
-> **Note:** `better-sqlite3` needs real POSIX file locking. If you run this from a folder that's synced/mounted over a network (a cloud-drive folder, or this project opened through a remote bridge), you may see `SQLITE_IOERR_DELETE`. Run it from a normal local folder, or point `DATABASE_PATH` at one, if that happens.
+## Design
 
-## API summary
+- **Database:** Postgres through `DATABASE_URL` (Neon in production). Without it, an embedded Postgres ([PGlite](https://pglite.dev)) stores data in `PGLITE_DIR`, so there's nothing to install. Tables are created automatically.
+- **Timing:** `src/lib/schedule.ts` derives the phase (`waiting → photo → question → … → finished`) from the start time alone, with 5 s per picture and 5 s per question, stored per game. No timers or sockets, so it works on serverless and a refresh never restarts a game.
+- **Secrecy:** `/play` returns a picture only during its window and a question with shuffled options (never the answer) only during its window. Answers are validated against the server clock, with a 1.5 s grace period.
+- **Finalization:** `src/lib/finalize.ts` grades, splits the on-chain pool equally among perfect scores, builds the Merkle tree and calls `finalizeGame`. It is triggered the first time anyone opens a finished game's results (or from the organizer page), and a row-level lock makes it safe under concurrent requests.
+- **Content:** `src/content/scenes.ts` has 12 illustrated scenes, each with two questions. A new game picks random scenes and one question from each. The admin API also accepts custom rounds (`photoUrl`, `question`, `options`, `correctIndex`).
+- **Email:** Resend (`RESEND_API_KEY`). Without it, local dev shows the code in the app. In production, registration returns a clear error until it's set.
 
-- `POST /auth/register` — email → sends a 6-digit verification code.
-- `POST /auth/verify` — code → session JWT.
-- `POST /auth/nickname` — set a unique nickname (auth required).
-- `POST /auth/wallet/nonce` / `POST /auth/wallet/link` — SIWE-style wallet linking: sign a nonce, verify with `viem`.
-- `GET /auth/me` — nickname, wallet address, live MON balance (read from chain), total rewards won.
-- `GET /games` — list of games with schedule, pool, participant count (from chain when configured).
-- `GET /games/:id` — single game + current phase.
-- `POST /games/:id/join` — record that the player's `joinGame()` tx confirmed.
-- `GET /games/:id/round` — the currently-revealed photo or question, computed server-side from `start_time` (never trusts the client's clock).
-- `POST /games/:id/answer` — submit an answer for the round currently open.
-- `GET /games/:id/leaderboard` — ranked nicknames + scores, ties share a rank.
-- `GET /games/:id/claim-info` — reward amount + Merkle proof for `claimReward()` on the contract.
-- `POST /admin/games` (header `x-admin-key`) — organizer tool to create a game's photos/questions off-chain.
+## API (all under `/api`)
 
-Socket.IO: clients `join-game-room` with a game id and receive `phase` ticks (`waiting` → `photo` → `question` → repeat → `finished`) once per second, driven entirely by the server clock.
+| Method | Path | |
+|---|---|---|
+| GET | `/config` | chain id, RPC, explorer, contract (used by the frontend) |
+| POST | `/auth/register` | email → sends code (45 s resend cooldown) |
+| POST | `/auth/verify` | email + code → token (5 attempts per code) |
+| POST | `/auth/nickname` | unique, case-insensitive |
+| POST | `/auth/wallet/nonce`, `/auth/wallet/link` | sign-to-link wallet |
+| GET | `/auth/me` | nickname, wallet, rewards won / to claim |
+| GET | `/games`, `/games/:id` | list / detail with on-chain pool, player count, status |
+| POST | `/games/:id/join` | after `joinGame()` confirms (the contract is the source of truth) |
+| GET | `/games/:id/play` | current picture or question |
+| POST | `/games/:id/answer` | `{ roundIndex, optionIndex }` |
+| GET | `/games/:id/results` | leaderboard, your score, reward + Merkle proof, claimed flag |
+| * | `/admin/...` | header `x-admin-key`: status, create + fund game, preview, cancel, finalize, withdraw |
 
-## Reward flow
+## Scripts
 
-1. When a game's last round ends, the scheduler grades every participant, finds everyone who scored 5/5, and splits the on-chain pool equally among them.
-2. It builds a Merkle tree over `(wallet, amount)` and calls `finalizeGame(gameId, root)` on the contract using the operator key.
-3. `GET /games/:id/claim-info` recomputes that same tree from the DB and returns the caller's proof, which the frontend passes to `claimReward()`.
-
-This means the backend never moves funds itself — it only publishes *who gets how much*, and the contract enforces the payout.
-
-## Deploying — a note if you're using Vercel
-
-Vercel is a great fit for the **frontend** (it's a static Vite build). The **backend** is a poor fit for Vercel's serverless functions as-is, because it:
-- keeps a live Socket.IO connection open per player (serverless functions are short-lived, request/response only)
-- runs a `setInterval` game-clock scheduler that must keep ticking every second (nothing persists between serverless invocations)
-- writes to a local SQLite file (serverless filesystems are ephemeral/read-only)
-
-For a real deployment, run the backend somewhere that supports a long-lived Node process — Railway, Render, Fly.io, or a small VM all work with zero code changes. Point the frontend's `VITE_API_URL` at that backend's URL, deploy the frontend to Vercel as normal, and set `FRONTEND_ORIGIN` on the backend to the Vercel URL for CORS.
-
-Email (Resend) works fine wherever the backend runs, including if you later split gameplay-grading into actual Vercel serverless functions — that's exactly the kind of stateless HTTP call Resend's API is built for.
+- `npm run create-game`: schedule a funded game via the admin API (works against a deployed URL with `API_URL=… ADMIN_KEY=…`).
+- `npm run e2e`: full automated flow with two real wallets (see the file header for the env it expects).

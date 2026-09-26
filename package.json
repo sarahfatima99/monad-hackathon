@@ -1,5 +1,12 @@
 {
   "name": "monad-memory-challenge",
   "private": true,
-  "description": "Root of the Monad Memory Challenge monorepo. Not an npm workspace — each of contracts/, backend/, and frontend/ is an independent project with its own node_modules and lockfile (run npm install inside each one separately). This avoids npm's workspace hoisting, which caused several platform-specific install issues during development."
+  "description": "Not an npm workspace: contracts/, backend/ and frontend/ are independent projects, each with its own node_modules. The scripts here are shortcuts used by Vercel and for local runs.",
+  "scripts": {
+    "vercel-install": "npm ci --prefix backend && npm ci --prefix frontend",
+    "vercel-build": "node scripts/vercel-build.mjs"
+  },
+  "engines": {
+    "node": ">=20.19"
+  }
 }

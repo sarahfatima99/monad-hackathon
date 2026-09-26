@@ -1,172 +1,248 @@
 import { Router } from "express";
 import { z } from "zod";
-import { nanoid } from "nanoid";
-import { db } from "../db.js";
-import { requireAuth, type AuthedRequest } from "../middleware/auth.js";
-import { getOnchainGame } from "../services/chain.js";
-import { getPhase } from "../services/scheduler.js";
-import { config } from "../config.js";
+import { query, queryOne } from "../db.js";
+import { optionalAuth, requireAuth, type AuthedRequest } from "../lib/auth.js";
+import { HttpError, route } from "../lib/http.js";
+import { answerWindow, displayStatus, gameEndMs, getPhase } from "../lib/schedule.js";
+import { hasClaimedOnchain, isRegisteredOnchain, readGame } from "../lib/chain.js";
+import { ensureFinalized, type GameRow } from "../lib/finalize.js";
+import { buildRewardsTree } from "../lib/merkle.js";
+import { shuffledOrder } from "../lib/shuffle.js";
 
 export const gamesRouter = Router();
 
-// List upcoming/live/finished games for the Games screen.
-gamesRouter.get("/", async (_req, res) => {
-  const games = db.prepare("SELECT * FROM games ORDER BY start_time ASC").all() as any[];
+async function loadGame(id: string): Promise<GameRow> {
+  const game = await queryOne<GameRow>("SELECT * FROM games WHERE id = $1", [id]);
+  if (!game) throw new HttpError(404, "Game not found");
+  return game;
+}
 
-  const enriched = await Promise.all(
-    games.map(async (g) => {
-      let poolWei = "0";
-      let participantCountOnchain = 0;
-      if (config.contractAddress && g.onchain_game_id !== null) {
-        try {
-          const onchain = await getOnchainGame(BigInt(g.onchain_game_id));
-          poolWei = onchain[1].toString();
-          participantCountOnchain = onchain[3];
-        } catch {
-          // fall back to off-chain count below
-        }
-      }
-      const offchainCount = (
-        db.prepare("SELECT COUNT(*) as c FROM game_participants WHERE game_id = ?").get(g.id) as { c: number }
-      ).c;
+async function onchainSummary(game: GameRow) {
+  try {
+    const g = await readGame(game.onchain_game_id);
+    return { poolWei: g.pool.toString(), participantCount: g.participantCount, onchainStatus: g.status };
+  } catch {
+    return { poolWei: null, participantCount: null, onchainStatus: null };
+  }
+}
 
-      return {
-        id: g.id,
-        name: g.name,
-        startTime: g.start_time,
-        status: g.status,
-        poolWei,
-        participantCount: participantCountOnchain || offchainCount
-      };
-    })
-  );
-
-  res.json({ games: enriched });
-});
-
-gamesRouter.get("/:gameId", requireAuth, (req: AuthedRequest, res) => {
-  const game = db.prepare("SELECT * FROM games WHERE id = ?").get(req.params.gameId) as any;
-  if (!game) return res.status(404).json({ error: "Game not found" });
-
-  const registered = db
-    .prepare("SELECT 1 FROM game_participants WHERE game_id = ? AND account_id = ?")
-    .get(game.id, req.accountId);
-
-  res.json({
+function publicGame(game: GameRow, now: number) {
+  return {
     id: game.id,
+    onchainGameId: game.onchain_game_id,
     name: game.name,
     startTime: game.start_time,
-    status: game.status,
-    joined: !!registered,
-    phase: getPhase(game.start_time * 1000, Date.now())
-  });
-});
+    endTime: Math.floor(gameEndMs(game) / 1000),
+    roundsCount: game.rounds_count,
+    photoSeconds: game.photo_seconds,
+    questionSeconds: game.question_seconds,
+    entryFeeWei: game.entry_fee_wei,
+    status: displayStatus(game, now),
+    finalized: game.finalize_state === "done",
+    winnersCount: game.winners_count,
+    rewardPerWinnerWei: game.reward_per_winner_wei
+  };
+}
 
-// Called after the player's joinGame() transaction confirms on-chain.
-gamesRouter.post("/:gameId/join", requireAuth, (req: AuthedRequest, res) => {
-  const schema = z.object({ txHash: z.string().optional() });
-  schema.parse(req.body);
+/**
+ * If the player joined on-chain but the follow-up call to the backend never
+ * happened (closed tab, network error), sync them in now — the contract is the
+ * source of truth for registration.
+ */
+async function ensureParticipant(game: GameRow, accountId: string): Promise<boolean> {
+  const existing = await queryOne("SELECT 1 FROM game_participants WHERE game_id = $1 AND account_id = $2", [game.id, accountId]);
+  if (existing) return true;
+  const account = await queryOne("SELECT wallet_address FROM accounts WHERE id = $1", [accountId]);
+  if (!account?.wallet_address) return false;
+  const registered = await isRegisteredOnchain(game.onchain_game_id, account.wallet_address).catch(() => false);
+  if (!registered) return false;
+  await query(
+    `INSERT INTO game_participants (game_id, account_id, wallet_address, joined_at) VALUES ($1, $2, $3, $4)
+     ON CONFLICT DO NOTHING`,
+    [game.id, accountId, account.wallet_address, Date.now()]
+  );
+  return true;
+}
 
-  const account = db.prepare("SELECT * FROM accounts WHERE id = ?").get(req.accountId) as any;
-  if (!account?.email_verified) return res.status(403).json({ error: "Email not verified" });
-  if (!account?.wallet_address) return res.status(403).json({ error: "Wallet not connected" });
+// Games screen: upcoming, live and recent games.
+gamesRouter.get(
+  "/",
+  optionalAuth,
+  route(async (req: AuthedRequest, res) => {
+    const now = Date.now();
+    const games = await query<GameRow>(
+      `SELECT * FROM games WHERE start_time > $1
+       ORDER BY CASE WHEN start_time * 1000 + rounds_count * (photo_seconds + question_seconds) * 1000 > $2 THEN 0 ELSE 1 END,
+                start_time ASC
+       LIMIT 40`,
+      [Math.floor(now / 1000) - 7 * 24 * 3600, now]
+    );
+    const joined = new Set(
+      req.accountId
+        ? (await query("SELECT game_id FROM game_participants WHERE account_id = $1", [req.accountId])).map((r) => r.game_id)
+        : []
+    );
+    const out = await Promise.all(
+      games.map(async (g) => ({ ...publicGame(g, now), ...(await onchainSummary(g)), joined: joined.has(g.id) }))
+    );
+    res.json({ serverTime: now, games: out });
+  })
+);
 
-  const game = db.prepare("SELECT * FROM games WHERE id = ?").get(req.params.gameId) as any;
-  if (!game) return res.status(404).json({ error: "Game not found" });
-  if (Date.now() >= game.start_time * 1000) return res.status(400).json({ error: "Registration closed" });
+gamesRouter.get(
+  "/:id",
+  optionalAuth,
+  route(async (req: AuthedRequest, res) => {
+    const game = await loadGame(req.params.id);
+    const now = Date.now();
+    const joined = req.accountId ? await ensureParticipant(game, req.accountId) : false;
+    res.json({ serverTime: now, game: { ...publicGame(game, now), ...(await onchainSummary(game)), joined }, phase: getPhase(game, now) });
+  })
+);
 
-  db.prepare(
-    "INSERT OR IGNORE INTO game_participants (game_id, account_id, wallet_address, joined_at) VALUES (?, ?, ?, ?)"
-  ).run(game.id, req.accountId, account.wallet_address, Date.now());
+// Called right after the player's joinGame() transaction confirms.
+gamesRouter.post(
+  "/:id/join",
+  requireAuth,
+  route(async (req: AuthedRequest, res) => {
+    const game = await loadGame(req.params.id);
+    const account = await queryOne("SELECT email_verified, wallet_address, nickname FROM accounts WHERE id = $1", [req.accountId]);
+    if (!account?.email_verified) throw new HttpError(403, "Verify your email first");
+    if (!account.nickname) throw new HttpError(403, "Choose a nickname first");
+    if (!account.wallet_address) throw new HttpError(403, "Link your wallet first");
+    if (!(await ensureParticipant(game, req.accountId!))) {
+      throw new HttpError(400, "Your linked wallet is not registered for this game on-chain yet");
+    }
+    res.json({ ok: true });
+  })
+);
 
-  res.json({ ok: true });
-});
+// Current photo or question. Content is only released during its own window,
+// so questions (and their answers) never reach the browser early.
+gamesRouter.get(
+  "/:id/play",
+  requireAuth,
+  route(async (req: AuthedRequest, res) => {
+    const game = await loadGame(req.params.id);
+    const now = Date.now();
+    const phase = getPhase(game, now);
+    const base = { serverTime: now, phase, roundsCount: game.rounds_count };
 
-// Current round's photo or question, released only once the server-side clock reaches it.
-gamesRouter.get("/:gameId/round", requireAuth, (req: AuthedRequest, res) => {
-  const game = db.prepare("SELECT * FROM games WHERE id = ?").get(req.params.gameId) as any;
-  if (!game) return res.status(404).json({ error: "Game not found" });
+    if (!(await ensureParticipant(game, req.accountId!))) {
+      return res.json({ ...base, registered: false });
+    }
+    if (phase.phase === "waiting" || phase.phase === "finished") return res.json({ ...base, registered: true });
 
-  const joined = db
-    .prepare("SELECT 1 FROM game_participants WHERE game_id = ? AND account_id = ?")
-    .get(game.id, req.accountId);
-  if (!joined) return res.status(403).json({ error: "Not registered for this game" });
+    const round = await queryOne("SELECT * FROM game_rounds WHERE game_id = $1 AND round_index = $2", [game.id, phase.roundIndex]);
+    if (!round) throw new HttpError(500, "Round content missing");
 
-  const phase = getPhase(game.start_time * 1000, Date.now());
-  if (phase.phase === "waiting" || phase.phase === "finished") {
-    return res.json({ phase });
-  }
+    if (phase.phase === "photo") {
+      return res.json({ ...base, registered: true, photo: round.photo });
+    }
 
-  const round = db
-    .prepare("SELECT * FROM game_rounds WHERE game_id = ? AND round_index = ?")
-    .get(game.id, phase.roundIndex) as any;
-  if (!round) return res.status(404).json({ error: "Round content missing" });
+    const options: string[] = round.options;
+    const order = shuffledOrder(options.length, `${game.id}:${req.accountId}:${phase.roundIndex}`);
+    const answer = await queryOne(
+      "SELECT option_index FROM game_answers WHERE game_id = $1 AND account_id = $2 AND round_index = $3",
+      [game.id, req.accountId, phase.roundIndex]
+    );
+    res.json({
+      ...base,
+      registered: true,
+      question: round.question,
+      options: order.map((i) => ({ id: i, text: options[i] })),
+      myAnswer: answer?.option_index ?? null
+    });
+  })
+);
 
-  if (phase.phase === "photo") {
-    return res.json({ phase, photoUrl: round.photo_url });
-  }
+gamesRouter.post(
+  "/:id/answer",
+  requireAuth,
+  route(async (req: AuthedRequest, res) => {
+    const body = z.object({ roundIndex: z.number().int().min(0), optionIndex: z.number().int().min(0) }).parse(req.body);
+    const game = await loadGame(req.params.id);
+    const now = Date.now();
+    const window = answerWindow(game, body.roundIndex);
+    if (body.roundIndex >= game.rounds_count || now < window.opens || now > window.closes) {
+      throw new HttpError(400, "Time's up for that question");
+    }
+    if (!(await ensureParticipant(game, req.accountId!))) throw new HttpError(403, "You're not registered for this game");
 
-  // question phase: never send correct_option_index to the client
-  return res.json({
-    phase,
-    question: round.question_text,
-    options: JSON.parse(round.options_json)
-  });
-});
+    const round = await queryOne("SELECT options FROM game_rounds WHERE game_id = $1 AND round_index = $2", [game.id, body.roundIndex]);
+    if (!round || body.optionIndex >= round.options.length) throw new HttpError(400, "Unknown option");
 
-gamesRouter.post("/:gameId/answer", requireAuth, (req: AuthedRequest, res) => {
-  const schema = z.object({ roundIndex: z.number().int().min(0), selectedOptionIndex: z.number().int().min(0) });
-  const { roundIndex, selectedOptionIndex } = schema.parse(req.body);
+    await query(
+      `INSERT INTO game_answers (game_id, account_id, round_index, option_index, answered_at) VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (game_id, account_id, round_index) DO UPDATE SET option_index = EXCLUDED.option_index, answered_at = EXCLUDED.answered_at`,
+      [game.id, req.accountId, body.roundIndex, body.optionIndex, now]
+    );
+    res.json({ ok: true });
+  })
+);
 
-  const game = db.prepare("SELECT * FROM games WHERE id = ?").get(req.params.gameId) as any;
-  if (!game) return res.status(404).json({ error: "Game not found" });
+// Leaderboard + the player's result and claim data. Opening this after a game
+// ends is what triggers grading and on-chain finalization (see finalize.ts).
+gamesRouter.get(
+  "/:id/results",
+  optionalAuth,
+  route(async (req: AuthedRequest, res) => {
+    let game = await loadGame(req.params.id);
+    const now = Date.now();
+    if (now < gameEndMs(game)) {
+      return res.json({ serverTime: now, game: { ...publicGame(game, now), ...(await onchainSummary(game)) }, ready: false, leaderboard: [] });
+    }
 
-  const phase = getPhase(game.start_time * 1000, Date.now());
-  if (phase.phase !== "question" || phase.roundIndex !== roundIndex) {
-    return res.status(400).json({ error: "Not accepting answers for that round right now" });
-  }
+    let finalizeError: string | null = null;
+    try {
+      game = await ensureFinalized(game);
+    } catch (err: any) {
+      finalizeError = err?.shortMessage ?? err?.message ?? "Finalization failed";
+    }
 
-  db.prepare(
-    `INSERT INTO game_answers (game_id, account_id, round_index, selected_option_index, answered_at)
-     VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT(game_id, account_id, round_index) DO UPDATE SET selected_option_index = excluded.selected_option_index`
-  ).run(game.id, req.accountId, roundIndex, selectedOptionIndex, Date.now());
+    const rows = await query<{ account_id: string; nickname: string; score: number | null; reward_wei: string | null; wallet_address: string }>(
+      `SELECT gp.account_id, a.nickname, gp.score, gp.reward_wei, gp.wallet_address
+       FROM game_participants gp JOIN accounts a ON a.id = gp.account_id
+       WHERE gp.game_id = $1
+       ORDER BY gp.score DESC NULLS LAST, lower(a.nickname) ASC`,
+      [game.id]
+    );
 
-  res.json({ ok: true });
-});
+    // Equal scores share a rank (1, 1, 3, ...).
+    let rank = 0;
+    const leaderboard = rows.map((r, i) => {
+      if (i === 0 || r.score !== rows[i - 1].score) rank = i + 1;
+      return {
+        rank,
+        nickname: r.nickname,
+        score: r.score ?? 0,
+        rewardWei: r.reward_wei ?? "0",
+        isMe: r.account_id === req.accountId
+      };
+    });
 
-gamesRouter.get("/:gameId/leaderboard", async (req, res) => {
-  const { buildLeaderboard } = await import("../services/scoring.js");
-  const game = db.prepare("SELECT * FROM games WHERE id = ?").get(req.params.gameId) as any;
-  if (!game) return res.status(404).json({ error: "Game not found" });
+    let me: Record<string, unknown> | null = null;
+    const mine = rows.find((r) => r.account_id === req.accountId);
+    if (mine && game.finalize_state === "done") {
+      const rewardWei = BigInt(mine.reward_wei ?? "0");
+      let proof: string[] = [];
+      let claimed = false;
+      if (rewardWei > 0n) {
+        const winners = rows.filter((r) => r.reward_wei && BigInt(r.reward_wei) > 0n);
+        const tree = buildRewardsTree(winners.map((w) => ({ wallet: w.wallet_address as `0x${string}`, amountWei: BigInt(w.reward_wei!) })));
+        proof = tree.proofFor({ wallet: mine.wallet_address as `0x${string}`, amountWei: rewardWei });
+        claimed = await hasClaimedOnchain(game.onchain_game_id, mine.wallet_address).catch(() => false);
+      }
+      me = { score: mine.score ?? 0, rewardWei: rewardWei.toString(), proof, claimed, wallet: mine.wallet_address };
+    }
 
-  const leaderboard = buildLeaderboard(game.id);
-  res.json({ status: game.status, leaderboard });
-});
-
-// Reward + Merkle proof a finished participant needs to call claimReward() on-chain.
-gamesRouter.get("/:gameId/claim-info", requireAuth, async (req: AuthedRequest, res) => {
-  const { buildRewardsTree } = await import("../services/merkle.js");
-  const game = db.prepare("SELECT * FROM games WHERE id = ?").get(req.params.gameId) as any;
-  if (!game || !game.finalized) return res.status(400).json({ error: "Game not finalized" });
-
-  const winners = db
-    .prepare(
-      "SELECT account_id as accountId, wallet_address as walletAddress, reward_amount_wei as rewardWei FROM game_participants WHERE game_id = ? AND reward_amount_wei IS NOT NULL"
-    )
-    .all(game.id) as { accountId: string; walletAddress: string; rewardWei: string }[];
-
-  const me = winners.find((w) => w.accountId === req.accountId);
-  if (!me) return res.json({ eligible: false });
-
-  const entries = winners.map((w) => ({ wallet: w.walletAddress as `0x${string}`, amountWei: BigInt(w.rewardWei) }));
-  const { proofFor } = buildRewardsTree(entries);
-  const proof = proofFor({ wallet: me.walletAddress as `0x${string}`, amountWei: BigInt(me.rewardWei) });
-
-  res.json({
-    eligible: true,
-    onchainGameId: game.onchain_game_id,
-    amountWei: me.rewardWei,
-    proof
-  });
-});
+    res.json({
+      serverTime: now,
+      game: { ...publicGame(game, now), ...(await onchainSummary(game)), finalizeTx: game.finalize_tx },
+      ready: game.finalize_state === "done",
+      finalizeError,
+      leaderboard,
+      me
+    });
+  })
+);
