@@ -130,6 +130,7 @@ async function migrate(q: Driver["query"]) {
       reward_wei NUMERIC,
       PRIMARY KEY (game_id, account_id)
     )`);
+  await q(`ALTER TABLE game_participants ADD COLUMN IF NOT EXISTS join_tx TEXT`);
   await q(`
     CREATE TABLE IF NOT EXISTS game_answers (
       game_id TEXT NOT NULL REFERENCES games(id),

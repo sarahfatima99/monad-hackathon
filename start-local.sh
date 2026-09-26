@@ -88,7 +88,7 @@ cat <<MSG
  (The app asks your wallet to switch/add the network automatically.)
 
  Email codes are shown on screen locally (no email service needed).
- Organizer page: http://localhost:5173/admin   key: dev-admin-key
+ Host page: http://localhost:5173/host   admin key: dev-admin-key
  Logs: .local-chain.log, .local-api.log
 ==================================================================
 

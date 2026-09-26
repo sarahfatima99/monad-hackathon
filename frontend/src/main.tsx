@@ -11,7 +11,12 @@ import { AccountPage } from "./pages/AccountPage";
 import { GamesPage } from "./pages/GamesPage";
 import { GamePage } from "./pages/GamePage";
 import { ResultsPage } from "./pages/ResultsPage";
-import { AdminPage } from "./pages/AdminPage";
+import { HostPage } from "./pages/HostPage";
+import "@fontsource-variable/archivo/wdth.css";
+import "@fontsource-variable/manrope";
+import "@fontsource/jetbrains-mono/400.css";
+import "@fontsource/jetbrains-mono/500.css";
+import "@fontsource/jetbrains-mono/700.css";
 import "./index.css";
 
 const queryClient = new QueryClient({ defaultOptions: { queries: { refetchOnWindowFocus: false } } });
@@ -50,7 +55,8 @@ function App() {
                 <Route path="/account" element={<AccountPage />} />
                 <Route path="/games/:gameId" element={<GamePage />} />
                 <Route path="/games/:gameId/results" element={<ResultsPage />} />
-                <Route path="/admin" element={<AdminPage />} />
+                <Route path="/host" element={<HostPage />} />
+                <Route path="/admin" element={<Navigate to="/host" replace />} />
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Route>
             </Routes>

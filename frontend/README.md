@@ -12,10 +12,10 @@ It needs **no environment variables**: chain id, RPC, explorer and contract addr
 ## Screens
 
 - **Games** (`/`): upcoming games with local start time, live countdown, registered players, prize pool, status, and Join / Enter lobby / View results. Recent results appear below.
-- **Account** (`/account`): email → code → nickname → connect and sign with a wallet. Returning players sign in with the same email.
-- **Lobby / Play** (`/games/:id`): countdown, pool, players and instructions, then switches automatically into the rounds: picture (5 s) then question (5 s) with timer bars, synced to the server clock.
+- **Account** (`/account`): email → code → nickname → wallet (connect MetaMask → switch network → sign). Returning players sign in with the same email.
+- **Lobby / Play** (`/games/:id`): countdown, pool, players and instructions, then switches automatically into the rounds: memory card (5 s) then question (5 s) with timer bars, synced to the server clock.
 - **Results** (`/games/:id/results`): leaderboard (ties share a rank, you're highlighted), your score, reward and **Claim**.
-- **Organizer** (`/admin`): schedule and fund games, preview content and answers, cancel, publish results, withdraw.
+- **Host** (`/host`): schedule and fund games, preview cards and answers, cancel, publish results, withdraw.
 
 The top bar shows your nickname, wallet, MON balance (read from the chain), rewards won and rewards to claim.
 

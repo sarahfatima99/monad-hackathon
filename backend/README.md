@@ -16,7 +16,7 @@ Easiest local setup: run `../start-local.sh`, which does all of this for you.
 - **Timing:** `src/lib/schedule.ts` derives the phase (`waiting → photo → question → … → finished`) from the start time alone, with 5 s per picture and 5 s per question, stored per game. No timers or sockets, so it works on serverless and a refresh never restarts a game.
 - **Secrecy:** `/play` returns a picture only during its window and a question with shuffled options (never the answer) only during its window. Answers are validated against the server clock, with a 1.5 s grace period.
 - **Finalization:** `src/lib/finalize.ts` grades, splits the on-chain pool equally among perfect scores, builds the Merkle tree and calls `finalizeGame`. It is triggered the first time anyone opens a finished game's results (or from the organizer page), and a row-level lock makes it safe under concurrent requests.
-- **Content:** `src/content/scenes.ts` has 12 illustrated scenes, each with two questions. A new game picks random scenes and one question from each. The admin API also accepts custom rounds (`photoUrl`, `question`, `options`, `correctIndex`).
+- **Content:** `src/content/cards.ts` generates a fresh memory card per round: a cream card with two sticker groups (color + shape, 1–5 each) and a badge number. The question (how many X, which shape was X, what color were X, badge number) is derived from the same card, so the answer is always exact. The admin API also accepts custom rounds (`photoUrl`, `question`, `options`, `correctIndex`).
 - **Email:** Resend (`RESEND_API_KEY`). Without it, local dev shows the code in the app. In production, registration returns a clear error until it's set.
 
 ## API (all under `/api`)

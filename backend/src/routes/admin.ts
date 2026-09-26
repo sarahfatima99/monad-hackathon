@@ -11,7 +11,7 @@ import {
 } from "../lib/chain.js";
 import { ensureFinalized, type GameRow } from "../lib/finalize.js";
 import { displayStatus, gameEndMs } from "../lib/schedule.js";
-import { pickRounds, scenes } from "../content/scenes.js";
+import { pickRounds } from "../content/cards.js";
 
 export const adminRouter = Router();
 adminRouter.use(requireAdmin);
@@ -33,7 +33,6 @@ adminRouter.get(
       operatorAddress: operator ?? null,
       operatorBalanceMon: balance === null ? null : formatEther(balance),
       emailConfigured: !!config.resendApiKey,
-      sceneCount: scenes.length,
       photoSeconds: config.photoSeconds,
       questionSeconds: config.questionSeconds
     });

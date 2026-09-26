@@ -2,7 +2,7 @@
 
 A scheduled, multiplayer memory game with on-chain prize pools on **Monad**. Players sign up with their email and a nickname, then connect a wallet and join a scheduled game. Everyone sees the same pictures at the same moment (5 seconds each) and then answers a question about each one (5 seconds each). Players who get every answer right split a MON prize pool that the smart contract holds and pays out.
 
-| Games | Picture (5 s) | Question (5 s) | Results |
+| Games | Memory card (5 s) | Question (5 s) | Results |
 |---|---|---|---|
 | ![Games](docs/screenshots/games.png) | ![Photo](docs/screenshots/photo.png) | ![Question](docs/screenshots/question.png) | ![Results](docs/screenshots/results.png) |
 
@@ -11,7 +11,7 @@ A scheduled, multiplayer memory game with on-chain prize pools on **Monad**. Pla
 1. **Register:** email → 6-digit code → unique nickname → connect a wallet and sign a message to prove you own it. Email is never written on-chain.
 2. **Browse games:** each card shows the start time in your timezone, a live countdown, registered players, the prize pool read from the contract, and a status (*Registration open*, *Starting soon*, *Live*, *Finished*).
 3. **Join:** a wallet transaction (`joinGame`) registers you on-chain before the start. The button then becomes **Enter lobby**.
-4. **Play:** at the scheduled time, picture 1 appears for 5 s, then its question for 5 s, for up to 5 rounds. Everyone gets the same pictures and questions, and the answer order is shuffled per player. Refreshing the page doesn't restart anything.
+4. **Play:** at the scheduled time, memory card 1 appears for 5 s, then a question about it for 5 s, for up to 5 rounds. Everyone gets the same pictures and questions, and the answer order is shuffled per player. Refreshing the page doesn't restart anything.
 5. **Results:** a leaderboard ranks nicknames by score, and equal scores share a rank. Perfect scores split the pool equally, and each winner claims their reward with **Claim**. If nobody gets a perfect score, the pool goes back to the organizer.
 
 ## 🟣 Built on Monad: where it's actually used
@@ -58,14 +58,14 @@ This is a Monad hackathon project, so to be explicit: **Monad is the blockchain 
 | Database | **Postgres**: Neon (via the Vercel Marketplace) in production; embedded **PGlite** locally (nothing to install) |
 | Email | **Resend** (verification codes) |
 | Frontend | **React + Vite + Tailwind**, **wagmi + viem** for wallets |
-| Game content | 12 illustrated scenes drawn in code (SVG), each with two questions whose answers are exact |
+| Game content | Procedurally generated **memory cards** (SVG): two sticker groups + a badge number, with the question generated from the same card so the answer is always exact |
 
 ## Repository layout
 
 ```
 contracts/   MemoryGame.sol, tests (npm test), compile/deploy scripts
-backend/     API: routes, Postgres layer, schedule, finalization, scene bank, e2e test
-frontend/    React app: Games, Account, Lobby/Play, Results, Organizer (/admin)
+backend/     API: routes, Postgres layer, schedule, finalization, memory-card generator, e2e test
+frontend/    React app: Games, Account, Lobby/Play, Results, Host (/host)
 scripts/     vercel-build.mjs — builds the static site + API function for Vercel
 start-local.sh   one-command local run
 ```
@@ -78,7 +78,7 @@ Requires Node.js 20.19+ (22 recommended) and a browser wallet such as MetaMask.
 ./start-local.sh          # add --clean if you ever see "installed for another platform" errors
 ```
 
-This starts a local chain, deploys the contract, starts the API (with an embedded database) and two demo games, then opens the web app at **http://localhost:5173**. The terminal prints the wallet network settings and a funded test account to import. Email codes are shown on screen locally. The organizer page is at `/admin`, with the key `dev-admin-key`.
+This starts a local chain, deploys the contract, starts the API (with an embedded database) and two demo games, then opens the web app at **http://localhost:5173**. The terminal prints the wallet network settings and a funded test account to import. Email codes are shown on screen locally. The Host page is at `/host`, with the admin key `dev-admin-key`.
 
 Tests:
 ```bash
@@ -108,14 +108,14 @@ The frontend and the API deploy together as **one Vercel project** from the repo
    | `CONTRACT_ADDRESS` | address from step 2 |
    | `OPERATOR_PRIVATE_KEY` | the operator wallet's private key |
    | `JWT_SECRET` | a long random string (e.g. `openssl rand -hex 32`) |
-   | `ADMIN_KEY` | a password for the organizer page |
+   | `ADMIN_KEY` | a password for the Host page |
    | `RESEND_API_KEY` | from Resend |
    | `EMAIL_FROM` | e.g. `Monad Memory Challenge <play@yourdomain.com>` |
    | `CHAIN_ID` | `10143` (default) |
    | `RPC_URL` | `https://testnet-rpc.monad.xyz` (default) |
    | `DATABASE_URL` | set by the Neon integration |
 
-7. **Deploy** (or redeploy after adding the variables). Open `https://<your-app>.vercel.app/admin`, enter your `ADMIN_KEY`, and schedule a game. It appears on the home page right away.
+7. **Deploy** (or redeploy after adding the variables). Open `https://<your-app>.vercel.app/host`, enter your `ADMIN_KEY`, and schedule a game. It appears on the home page right away.
 
 The frontend itself needs no environment variables; it reads the chain settings from `/api/config`.
 

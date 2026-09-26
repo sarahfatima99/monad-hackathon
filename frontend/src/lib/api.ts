@@ -90,4 +90,10 @@ export interface AppConfig {
   rpcUrl: string;
   explorerUrl: string;
   contractAddress: `0x${string}` | null;
+  operatorAddress: `0x${string}` | null;
+  faucetUrl: string | null;
+}
+
+export interface GameDetail extends GameSummary {
+  myJoinTx: string | null;
 }

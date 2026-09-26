@@ -96,7 +96,18 @@ gamesRouter.get(
     const game = await loadGame(req.params.id);
     const now = Date.now();
     const joined = req.accountId ? await ensureParticipant(game, req.accountId) : false;
-    res.json({ serverTime: now, game: { ...publicGame(game, now), ...(await onchainSummary(game)), joined }, phase: getPhase(game, now) });
+    const players = await query<{ account_id: string; nickname: string; join_tx: string | null }>(
+      `SELECT gp.account_id, a.nickname, gp.join_tx FROM game_participants gp JOIN accounts a ON a.id = gp.account_id
+       WHERE gp.game_id = $1 ORDER BY gp.joined_at ASC LIMIT 60`,
+      [game.id]
+    );
+    const mine = players.find((p) => p.account_id === req.accountId);
+    res.json({
+      serverTime: now,
+      game: { ...publicGame(game, now), ...(await onchainSummary(game)), joined, myJoinTx: mine?.join_tx ?? null },
+      players: players.map((p) => ({ nickname: p.nickname, isMe: p.account_id === req.accountId })),
+      phase: getPhase(game, now)
+    });
   })
 );
 
@@ -112,6 +123,10 @@ gamesRouter.post(
     if (!account.wallet_address) throw new HttpError(403, "Link your wallet first");
     if (!(await ensureParticipant(game, req.accountId!))) {
       throw new HttpError(400, "Your linked wallet is not registered for this game on-chain yet");
+    }
+    const { txHash } = z.object({ txHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/).optional() }).parse(req.body ?? {});
+    if (txHash) {
+      await query("UPDATE game_participants SET join_tx = $3 WHERE game_id = $1 AND account_id = $2 AND join_tx IS NULL", [game.id, req.accountId, txHash]);
     }
     res.json({ ok: true });
   })
