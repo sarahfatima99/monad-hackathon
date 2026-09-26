@@ -1,11 +1,5 @@
 {
   "name": "monad-memory-challenge",
   "private": true,
-  "workspaces": ["contracts", "backend", "frontend"],
-  "scripts": {
-    "contracts:compile": "npm run compile -w contracts",
-    "contracts:test": "npm run test -w contracts",
-    "backend:dev": "npm run dev -w backend",
-    "frontend:dev": "npm run dev -w frontend"
-  }
+  "description": "Root of the Monad Memory Challenge monorepo. Not an npm workspace — each of contracts/, backend/, and frontend/ is an independent project with its own node_modules and lockfile (run npm install inside each one separately). This avoids npm's workspace hoisting, which caused several platform-specific install issues during development."
 }

@@ -8,3 +8,4 @@ dist
 contracts/artifacts
 contracts/cache
 frontend/tsconfig.tsbuildinfo
+contracts/build
